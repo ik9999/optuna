@@ -33,6 +33,10 @@ from optuna.trial import create_trial
 from optuna.trial import FrozenTrial
 from optuna.trial import TrialState
 
+from threading import Lock
+
+pop_trial_lock = Lock()
+
 
 ObjectiveFuncType = Callable[[trial_module.Trial], Union[float, Sequence[float]]]
 
@@ -972,6 +976,7 @@ class Study(BaseStudy):
     def _pop_waiting_trial_id(self) -> Optional[int]:
 
         # TODO(c-bata): Reduce database query counts for extracting waiting trials.
+        pop_trial_lock.acquire()
         for trial in self._storage.get_all_trials(self._study_id, deepcopy=False):
             if trial.state != TrialState.WAITING:
                 continue
@@ -980,8 +985,10 @@ class Study(BaseStudy):
                 continue
 
             _logger.debug("Trial {} popped from the trial queue.".format(trial.number))
+            pop_trial_lock.release()
             return trial._trial_id
 
+        pop_trial_lock.release()
         return None
 
     @deprecated("2.5.0")
