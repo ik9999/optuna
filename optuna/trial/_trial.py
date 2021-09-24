@@ -21,6 +21,7 @@ from optuna.distributions import LogUniformDistribution
 from optuna.distributions import UniformDistribution
 from optuna.trial._base import BaseTrial
 from optuna.trial._state import TrialState
+from timeit import default_timer as timer
 
 
 _logger = logging.get_logger(__name__)
@@ -623,6 +624,8 @@ class Trial(BaseTrial):
             )
 
         trial = self.study._storage.get_trial(self._trial_id)
+        if self.study.pruner is None:
+            return False
         return self.study.pruner.prune(self.study, trial)
 
     def set_user_attr(self, key: str, value: Any) -> None:

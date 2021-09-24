@@ -155,6 +155,10 @@ class RDBStorage(BaseStorage):
         heartbeat_interval: Optional[int] = None,
         grace_period: Optional[int] = None,
         failed_trial_callback: Optional[Callable[["optuna.Study", FrozenTrial], None]] = None,
+        remove_pruned_trials: Optional[bool] = False,
+        cache_completed_trials: Optional[bool] = True,
+        redis_storage = None,
+        RedisLock = None,
     ) -> None:
 
         self.engine_kwargs = engine_kwargs or {}
@@ -167,6 +171,10 @@ class RDBStorage(BaseStorage):
         self.heartbeat_interval = heartbeat_interval
         self.grace_period = grace_period
         self.failed_trial_callback = failed_trial_callback
+        self.remove_pruned_trials = remove_pruned_trials
+        self.cache_completed_trials = cache_completed_trials
+        self.redis_storage = redis_storage
+        self.RedisLock = RedisLock
 
         self._set_default_engine_kwargs_for_mysql(url, self.engine_kwargs)
 
@@ -209,6 +217,21 @@ class RDBStorage(BaseStorage):
         self._version_manager = _VersionManager(self.url, self.engine, self.scoped_session)
         if not self.skip_compatibility_check:
             self._version_manager.check_table_schema_compatibility()
+
+    # def acquire_lock(self, lock_id: int) -> bool:
+        # if self.engine.driver != 'psycopg2':
+            # raise Exception('not_implemented')
+        # with _create_scoped_session(self.scoped_session, True) as session:
+            # result = session.execute('SELECT pg_try_advisory_lock(:lock_id)', {'lock_id': lock_id})
+            # #TODO use custom table for locks and table-level locks
+            # result_list = result.all()
+            # print(result_list)
+
+    # def release_lock(self, lock_id: int) -> bool:
+        # if self.engine.driver != 'psycopg2':
+            # raise Exception('not_implemented')
+        # with _create_scoped_session(self.scoped_session, True) as session:
+            # session.execute('SELECT pg_advisory_unlock(:lock_id)', {'lock_id': lock_id})
 
     def create_new_study(self, study_name: Optional[str] = None) -> int:
 
@@ -489,6 +512,28 @@ class RDBStorage(BaseStorage):
 
         return study_summaries
 
+    def get_trials_count_by_state(self, study_id: int, state: TrialState) -> int:
+        with _create_scoped_session(self.scoped_session) as session:
+            return session.query(func.count(models.TrialModel.trial_id)).filter(
+                models.TrialModel.state == state
+            ).filter(models.TrialModel.study_id == study_id).scalar()
+
+    def is_trial_hash_exist(self, study_id: int, hash: str) -> bool:
+            with _create_scoped_session(self.scoped_session) as session:
+                cnt = session.query(func.count(models.TrialParamHashModel.hash_id)).filter(
+                    models.TrialParamHashModel.study_id == study_id
+                ).filter(models.TrialParamHashModel.hash == hash).scalar()
+                return cnt > 0
+
+    def save_trial_hash(self, study_id: int, hash: str) -> bool:
+        try:
+            with _create_scoped_session(self.scoped_session) as session:
+                param_hash_model = models.TrialParamHashModel(study_id=study_id, hash=hash)
+                session.add(param_hash_model)
+            return True
+        except Exception as e:
+            return False
+
     def create_new_trial(self, study_id: int, template_trial: Optional[FrozenTrial] = None) -> int:
 
         return self._create_new_trial(study_id, template_trial)._trial_id
@@ -577,6 +622,11 @@ class RDBStorage(BaseStorage):
                 datetime_complete=template_trial.datetime_complete,
             )
 
+        # session.execute('SELECT pg_advisory_lock(:study_id, :lock_id)', {
+            # 'study_id': study_id,
+            # 'lock_id': 1
+        # })
+
         session.add(trial)
 
         # Flush the session cache to reflect the above addition operation to
@@ -615,8 +665,19 @@ class RDBStorage(BaseStorage):
 
             trial.state = template_trial.state
 
-        trial.number = trial.count_past_trials(session)
+
+        # session.execute('LOCK TABLE trials IN ACCESS EXCLUSIVE MODE;')
+        # last_number = session.query(models.TrialModel.trial_id).filter(
+            # models.TrialModel.trial_id < trial.trial_id, 
+            # models.TrialModel.study_id == trial.study_id
+        # ).order_by(models.TrialModel.trial_id.desc()).limit(1).scalar()
+        trial.number = trial.trial_id
         session.add(trial)
+
+        # session.execute('SELECT pg_advisory_unlock(:study_id, :lock_id)', {
+            # 'study_id': study_id,
+            # 'lock_id': 1
+        # })
 
         return trial
 
@@ -962,6 +1023,18 @@ class RDBStorage(BaseStorage):
         else:
             attribute.value_json = json.dumps(value)
 
+    def get_first_waiting_trial_id(self, study_id: int) -> Optional[int]:
+        with _create_scoped_session(self.scoped_session) as session:
+            trial_id = (
+                session.query(models.TrialModel.trial_id).filter(
+                    models.TrialModel.state == TrialState.WAITING,
+                    models.TrialModel.study_id == study_id,
+                ).order_by(models.TrialModel.trial_id.asc()).limit(1).one_or_none()
+            )
+            if trial_id is None:
+                return None
+            return trial_id[0]
+
     def get_trial_id_from_study_id_trial_number(self, study_id: int, trial_number: int) -> int:
 
         with _create_scoped_session(self.scoped_session) as session:
@@ -993,6 +1066,11 @@ class RDBStorage(BaseStorage):
             frozen_trial = self._build_frozen_trial_from_trial_model(trial_model)
 
         return frozen_trial
+
+    def delete_trial(self, trial_id: int) -> None:
+        with _create_scoped_session(self.scoped_session, True) as session:
+            obj = session.query(models.TrialModel).filter(models.TrialModel.trial_id==trial_id).first()
+            session.delete(obj)
 
     def get_all_trials(
         self,

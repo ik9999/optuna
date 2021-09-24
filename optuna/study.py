@@ -11,6 +11,7 @@ from typing import Tuple
 from typing import Type
 from typing import Union
 import warnings
+import time
 
 from optuna import exceptions
 from optuna import logging
@@ -32,8 +33,11 @@ from optuna.distributions import BaseDistribution
 from optuna.trial import create_trial
 from optuna.trial import FrozenTrial
 from optuna.trial import TrialState
+from optuna.storages._rdb.storage import _create_scoped_session
 
 from threading import Lock
+from contextlib import nullcontext
+from timeit import default_timer as timer
 
 pop_trial_lock = Lock()
 
@@ -237,7 +241,7 @@ class Study(BaseStudy):
         super().__init__(study_id, storage)
 
         self.sampler = sampler or samplers.TPESampler()
-        self.pruner = pruner or pruners.MedianPruner()
+        self.pruner = pruner
 
         self._optimize_lock = threading.Lock()
         self._stop_flag = False
@@ -312,6 +316,7 @@ class Study(BaseStudy):
         callbacks: Optional[List[Callable[["Study", FrozenTrial], None]]] = None,
         gc_after_trial: bool = False,
         show_progress_bar: bool = False,
+        only_waiting_trials: bool = False,
     ) -> None:
         """Optimize an objective function.
 
@@ -412,11 +417,12 @@ class Study(BaseStudy):
             callbacks=callbacks,
             gc_after_trial=gc_after_trial,
             show_progress_bar=show_progress_bar,
+            only_waiting_trials=only_waiting_trials,
         )
 
     def ask(
-        self, fixed_distributions: Optional[Dict[str, BaseDistribution]] = None
-    ) -> trial_module.Trial:
+        self, fixed_distributions: Optional[Dict[str, BaseDistribution]] = None, only_waiting_trials: bool = False
+    ) -> Optional[trial_module.Trial]:
         """Create a new trial from which hyperparameters can be suggested.
 
         This method is part of an alternative to :func:`~optuna.study.Study.optimize` that allows
@@ -482,11 +488,21 @@ class Study(BaseStudy):
 
         fixed_distributions = fixed_distributions or {}
 
-        # Sync storage once every trial.
-        self._storage.read_trials_from_remote_storage(self._study_id)
+        if self._storage._backend.cache_completed_trials:
+            start = timer()
+            self._storage.read_trials_from_remote_storage(self._study_id)
+            end = timer()
+            print('read_trials_from_remote_storage time ', end - start)
 
-        trial_id = self._pop_waiting_trial_id()
+        trial_id = None
+        if only_waiting_trials:
+            start = timer()
+            trial_id = self._pop_waiting_trial_id()
+            end = timer()
+            print('_pop_waiting_trial_id time ', end - start)
         if trial_id is None:
+            if only_waiting_trials:
+                return None
             trial_id = self._storage.create_new_trial(self._study_id)
         trial = trial_module.Trial(self, trial_id)
 
@@ -827,7 +843,7 @@ class Study(BaseStudy):
         self._stop_flag = True
 
     @experimental("1.2.0")
-    def enqueue_trial(self, params: Dict[str, Any]) -> None:
+    def enqueue_trial(self, params: Dict[str, Any]) -> int:
         """Enqueue a trial with given parameter values.
 
         You can fix the next sampling parameters which will be evaluated in your
@@ -858,12 +874,12 @@ class Study(BaseStudy):
                 Parameter values to pass your objective function.
         """
 
-        self.add_trial(
+        return self.add_trial(
             create_trial(state=TrialState.WAITING, system_attrs={"fixed_params": params})
         )
 
     @experimental("2.0.0")
-    def add_trial(self, trial: FrozenTrial) -> None:
+    def add_trial(self, trial: FrozenTrial) -> int:
         """Add trial to study.
 
         The trial is validated before being added.
@@ -926,7 +942,7 @@ class Study(BaseStudy):
 
         trial._validate()
 
-        self._storage.create_new_trial(self._study_id, template_trial=trial)
+        return self._storage.create_new_trial(self._study_id, template_trial=trial)
 
     @experimental("2.5.0")
     def add_trials(self, trials: Iterable[FrozenTrial]) -> None:
@@ -974,21 +990,24 @@ class Study(BaseStudy):
             self.add_trial(trial)
 
     def _pop_waiting_trial_id(self) -> Optional[int]:
+        context = nullcontext
+        redis = self._storage._backend.redis_storage 
+        RedisLock = self._storage._backend.RedisLock
 
-        # TODO(c-bata): Reduce database query counts for extracting waiting trials.
-        pop_trial_lock.acquire()
-        for trial in self._storage.get_all_trials(self._study_id, deepcopy=False):
-            if trial.state != TrialState.WAITING:
-                continue
-
-            if not self._storage.set_trial_state(trial._trial_id, TrialState.RUNNING):
-                continue
-
-            _logger.debug("Trial {} popped from the trial queue.".format(trial.number))
-            pop_trial_lock.release()
-            return trial._trial_id
-
-        pop_trial_lock.release()
+        context = nullcontext
+        if self._storage._backend.redis_storage is not None and self._storage._backend.RedisLock is not None:
+            context = self._storage._backend.RedisLock(self._storage._backend.redis_storage, '_pop_waiting_trial_id')
+        with context:
+            trial_id = self._storage._backend.get_first_waiting_trial_id(self._study_id)
+            if trial_id is not None:
+                _logger.info(f'_pop_waiting_trial_id {trial_id}')
+                if self._storage._backend.cache_completed_trials:
+                    if self._storage.set_trial_state(trial_id, TrialState.RUNNING):
+                        return trial_id
+                else:
+                    if self._storage._backend.set_trial_state(trial_id, TrialState.RUNNING):
+                        return trial_id
+        _logger.info(f'_pop_waiting_trial_id none')
         return None
 
     @deprecated("2.5.0")

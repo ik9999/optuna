@@ -173,6 +173,9 @@ class _CachedStorage(BaseStorage):
 
         return self._backend.get_all_study_summaries()
 
+    def get_trials_count_by_state(self, study_id: int, state: TrialState) -> int:
+        return self._backend.get_trials_count_by_state(study_id, state)
+
     def create_new_trial(self, study_id: int, template_trial: Optional[FrozenTrial] = None) -> int:
 
         frozen_trial = self._backend._create_new_trial(study_id, template_trial)
@@ -193,6 +196,26 @@ class _CachedStorage(BaseStorage):
                 study.owned_or_finished_trial_ids.add(frozen_trial._trial_id)
         return trial_id
 
+    def delete_trial_if_needed(self, trial_id: int) -> None:
+        if self._backend.remove_pruned_trials:
+            print('remove pruned trial', trial_id)
+            self.delete_trial_from_cache(trial_id)
+            self._backend.delete_trial(trial_id)
+
+    def delete_trial_from_cache(self, trial_id: int) -> None:
+        if trial_id not in self._trial_id_to_study_id_and_number:
+            return None
+        trial_data = self._trial_id_to_study_id_and_number[trial_id]
+        if trial_data[0] in self._studies:
+            study = self._studies[trial_data[0]]
+            if trial_id in study.trials:
+                print('remove from cache', trial_id)
+                del study.trials[trial_id]
+            if trial_id in study.owned_or_finished_trial_ids:
+                study.owned_or_finished_trial_ids.remove(trial_id)
+            if trial_id in self._trial_id_to_study_id_and_number:
+                del self._trial_id_to_study_id_and_number[trial_id]
+
     def set_trial_state(self, trial_id: int, state: TrialState) -> bool:
 
         with self._lock:
@@ -212,7 +235,7 @@ class _CachedStorage(BaseStorage):
                     updates.datetime_complete = datetime.datetime.now()
                     cached_trial.datetime_complete = datetime.datetime.now()
                 return self._flush_trial(trial_id)
-
+        
         ret = self._backend.set_trial_state(trial_id, state)
         if (
             ret

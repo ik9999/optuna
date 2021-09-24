@@ -17,6 +17,7 @@ from sqlalchemy import String
 from sqlalchemy import Text
 from sqlalchemy import UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
+import sqlalchemy
 
 from optuna import distributions
 from optuna._study_direction import StudyDirection
@@ -285,9 +286,16 @@ class TrialUserAttributeModel(BaseModel):
         cls, trial: TrialModel, key: str, session: orm.Session
     ) -> Optional["TrialUserAttributeModel"]:
 
+        return TrialUserAttributeModel.find_by_trial_id_and_key(trial.trial_id, key, session)
+
+    @classmethod
+    def find_by_trial_id_and_key(
+        cls, trial_id: int, key: str, session: orm.Session
+    ) -> Optional["TrialUserAttributeModel"]:
+
         attribute = (
             session.query(cls)
-            .filter(cls.trial_id == trial.trial_id)
+            .filter(cls.trial_id == trial_id)
             .filter(cls.key == key)
             .one_or_none()
         )
@@ -511,3 +519,20 @@ class VersionInfoModel(BaseModel):
         version_info = session.query(cls).one_or_none()
 
         return version_info
+
+class KeyvalueModel(BaseModel):
+    __tablename__ = "key_value"
+    key = Column(String(255), primary_key=True)
+    value = Column(Text())
+
+class TrialParamHashModel(BaseModel):
+    __tablename__ = "trial_param_hashes"
+    __table_args__: Any = (UniqueConstraint("study_id", "hash"),)
+    hash_id = Column(Integer, primary_key=True)
+    study_id = Column(Integer, ForeignKey('studies.study_id', ondelete='CASCADE'))
+    hash = Column(String(256), index=True, nullable=False)
+
+    study = orm.relationship(
+        StudyModel, backref=orm.backref("hashes", cascade="all, delete-orphan")
+    )
+

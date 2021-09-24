@@ -22,6 +22,7 @@ from typing import Tuple
 from typing import Type
 from typing import Union
 import warnings
+import time
 
 import optuna
 from optuna import exceptions
@@ -46,6 +47,7 @@ def _optimize(
     callbacks: Optional[List[Callable[["optuna.Study", FrozenTrial], None]]] = None,
     gc_after_trial: bool = False,
     show_progress_bar: bool = False,
+    only_waiting_trials: bool = False,
 ) -> None:
     if not isinstance(catch, tuple):
         raise TypeError(
@@ -56,72 +58,90 @@ def _optimize(
         raise RuntimeError("Nested invocation of `Study.optimize` method isn't allowed.")
 
     # TODO(crcrpar): Make progress bar work when n_jobs != 1.
-    progress_bar = pbar_module._ProgressBar(show_progress_bar and n_jobs == 1, n_trials, timeout)
+    # progress_bar = pbar_module._ProgressBar(show_progress_bar and n_jobs == 1, n_trials, timeout)
 
     study._stop_flag = False
 
     try:
-        if n_jobs == 1:
-            _optimize_sequential(
-                study,
-                func,
-                n_trials,
-                timeout,
-                catch,
-                callbacks,
-                gc_after_trial,
-                reseed_sampler_rng=False,
-                time_start=None,
-                progress_bar=progress_bar,
-            )
-        else:
-            if show_progress_bar:
-                warnings.warn("Progress bar only supports serial execution (`n_jobs=1`).")
+        # if n_jobs == 1:
+            # if n_trial is not None:
+                # raise Exception('n_trial set for n_jobs = 1')
+            # if only_waiting_trials is not None:
+                # raise Exception('only_waiting_trials set for n_jobs = 1')
+            # _optimize_sequential(
+                # study,
+                # func,
+                # n_trials,
+                # timeout,
+                # catch,
+                # callbacks,
+                # gc_after_trial,
+                # reseed_sampler_rng=False,
+                # time_start=None,
+                # progress_bar=progress_bar,
+                # only_waiting_trials=only_waiting_trials
+            # )
+        # else:
+        if show_progress_bar:
+            warnings.warn("Progress bar only supports serial execution (`n_jobs=1`).")
 
-            if n_jobs == -1:
-                n_jobs = os.cpu_count() or 1
+        if n_jobs == -1:
+            n_jobs = os.cpu_count() or 1
 
-            time_start = datetime.datetime.now()
-            futures: Set[Future] = set()
+        time_start = datetime.datetime.now()
+        futures: Set[Future] = set()
 
-            with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-                for n_submitted_trials in itertools.count():
-                    if study._stop_flag:
+        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+            for n_submitted_trials in itertools.count():
+                if study._stop_flag:
+                    break
+
+                if (
+                    timeout is not None
+                    and (datetime.datetime.now() - time_start).total_seconds() > timeout
+                ):
+                    break
+
+                if n_trials is not None:
+                    finished_studies = study._storage.get_trials_count_by_state(
+                        study._study_id, TrialState.COMPLETE
+                    ) + study._storage.get_trials_count_by_state(study._study_id, TrialState.PRUNED)
+                    if finished_studies >= n_trials:
                         break
 
-                    if (
-                        timeout is not None
-                        and (datetime.datetime.now() - time_start).total_seconds() > timeout
-                    ):
+
+                if only_waiting_trials:
+                    if study._storage.get_trials_count_by_state(study._study_id, TrialState.WAITING) <= 0:
                         break
 
-                    if n_trials is not None and n_submitted_trials >= n_trials:
-                        break
+                # if n_trials is not None and n_submitted_trials >= n_trials:
+                    # break
 
-                    if len(futures) >= n_jobs:
-                        completed, futures = wait(futures, return_when=FIRST_COMPLETED)
-                        # Raise if exception occurred in executing the completed futures.
-                        for f in completed:
-                            f.result()
+                if len(futures) >= n_jobs:
+                    completed, futures = wait(futures, return_when=FIRST_COMPLETED)
+                    # Raise if exception occurred in executing the completed futures.
+                    for f in completed:
+                        f.result()
 
-                    futures.add(
-                        executor.submit(
-                            _optimize_sequential,
-                            study,
-                            func,
-                            1,
-                            timeout,
-                            catch,
-                            callbacks,
-                            gc_after_trial,
-                            True,
-                            time_start,
-                            None,
-                        )
+                futures.add(
+                    executor.submit(
+                        _optimize_sequential,
+                        study,
+                        func,
+                        1,
+                        timeout,
+                        catch,
+                        callbacks,
+                        gc_after_trial,
+                        True,
+                        time_start,
+                        None,
+                        only_waiting_trials
                     )
+                )
     finally:
         study._optimize_lock.release()
-        progress_bar.close()
+        # progress_bar.close()
 
 
 def _optimize_sequential(
@@ -135,14 +155,16 @@ def _optimize_sequential(
     reseed_sampler_rng: bool,
     time_start: Optional[datetime.datetime],
     progress_bar: Optional[pbar_module._ProgressBar],
+    only_waiting_trials: bool = False,
 ) -> None:
     if reseed_sampler_rng:
         study.sampler.reseed_rng()
 
-    i_trial = 0
 
     if time_start is None:
         time_start = datetime.datetime.now()
+
+    i_trial = 0
 
     while True:
         if study._stop_flag:
@@ -159,7 +181,10 @@ def _optimize_sequential(
                 break
 
         try:
-            trial = _run_trial(study, func, catch)
+            trial = _run_trial(study, func, catch, only_waiting_trials)
+            if trial is None:
+                time.sleep(5)
+                break
         except Exception:
             raise
         finally:
@@ -170,13 +195,18 @@ def _optimize_sequential(
             if gc_after_trial:
                 gc.collect()
 
+        frozen_trial = copy.deepcopy(study._storage.get_trial(trial._trial_id))
         if callbacks is not None:
-            frozen_trial = copy.deepcopy(study._storage.get_trial(trial._trial_id))
             for callback in callbacks:
                 callback(study, frozen_trial)
 
         if progress_bar is not None:
             progress_bar.update((datetime.datetime.now() - time_start).total_seconds())
+        if frozen_trial.state == TrialState.PRUNED:
+            study._storage.delete_trial_if_needed(frozen_trial._trial_id)
+        else:
+            if not study._storage._backend.cache_completed_trials:
+                study._storage.delete_trial_from_cache(frozen_trial._trial_id)
 
     study._storage.remove_session()
 
@@ -185,7 +215,8 @@ def _run_trial(
     study: "optuna.Study",
     func: "optuna.study.ObjectiveFuncType",
     catch: Tuple[Type[Exception], ...],
-) -> trial_module.Trial:
+    only_waiting_trials: bool = False,
+) -> Optional[trial_module.Trial]:
     if study._storage.is_heartbeat_enabled():
         failed_trial_ids = study._storage.fail_stale_trials(study._study_id)
         failed_trial_callback = study._storage.get_failed_trial_callback()
@@ -194,7 +225,9 @@ def _run_trial(
                 failed_trial = copy.deepcopy(study._storage.get_trial(trial_id))
                 failed_trial_callback(study, failed_trial)
 
-    trial = study.ask()
+    trial = study.ask(None, only_waiting_trials)
+    if trial is None:
+        return None
 
     state: Optional[TrialState] = None
     values: Optional[List[float]] = None
@@ -245,9 +278,10 @@ def _run_trial(
         raise
     finally:
         if state == TrialState.COMPLETE:
-            study._log_completed_trial(trial, cast(List[float], values))
+            # study._log_completed_trial(trial, cast(List[float], values))
+            pass
         elif state == TrialState.PRUNED:
-            _logger.info("Trial {} pruned. {}".format(trial.number, str(func_err)))
+            _logger.info("Trial {} pruned. {}".format(trial._trial_id, str(func_err)))
         elif state == TrialState.FAIL:
             if func_err is not None:
                 _logger.warning(
