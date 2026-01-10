@@ -291,3 +291,30 @@ class _CachedStorage(BaseStorage, BaseHeartbeat):
 
     def get_failed_trial_callback(self) -> Callable[["optuna.Study", FrozenTrial], None] | None:
         return self._backend.get_failed_trial_callback()
+
+    # def get_trials_count_by_state(self, study_id: int, state: TrialState) -> int:
+        # return self._backend.get_trials_count_by_state(study_id, state)
+
+
+    def delete_trial_if_needed(self, trial_id: int) -> None:
+        if self._backend.remove_pruned_trials:
+            print('remove pruned trial', trial_id)
+            self.delete_trial_from_cache(trial_id)
+            self._backend.delete_trial(trial_id)
+
+    def delete_trial_from_cache(self, trial_id: int) -> None:
+        if trial_id not in self._trial_id_to_study_id_and_number:
+            return None
+        trial_data = self._trial_id_to_study_id_and_number[trial_id]
+        if trial_data[0] in self._studies:
+            study_id = trial_data[0]
+            study = self._studies[study_id]
+            if trial_id in study.trials:
+                del study.trials[trial_id]
+            if trial_id in study.unfinished_trial_ids:
+                study.unfinished_trial_ids.remove(trial_id)
+            if (study_id, trial_id) in self._study_id_and_number_to_trial_id:
+                del self._study_id_and_number_to_trial_id[(study_id, trial_id)]
+            if trial_id in self._trial_id_to_study_id_and_number:
+                del self._trial_id_to_study_id_and_number[trial_id]
+

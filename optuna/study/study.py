@@ -8,7 +8,7 @@ from collections.abc import Sequence
 import copy
 from numbers import Real
 import threading
-from typing import Any
+from typing import Any, Optional
 from typing import cast
 from typing import TYPE_CHECKING
 from typing import Union
@@ -847,7 +847,7 @@ class Study:
         params: dict[str, Any],
         user_attrs: dict[str, Any] | None = None,
         skip_if_exists: bool = False,
-    ) -> None:
+    ) -> Optional[int]:
         """Enqueue a trial with given parameter values.
 
         You can fix the next sampling parameters which will be evaluated in your
@@ -899,7 +899,7 @@ class Study:
             _logger.info(f"Trial with params {params} already exists. Skipping enqueue.")
             return
 
-        self.add_trial(
+        return self.add_trial(
             create_trial(
                 state=TrialState.WAITING,
                 system_attrs={"fixed_params": params},
@@ -907,7 +907,7 @@ class Study:
             )
         )
 
-    def add_trial(self, trial: FrozenTrial) -> None:
+    def add_trial(self, trial: FrozenTrial) -> int:
         """Add trial to study.
 
         The trial is validated before being added.
@@ -977,7 +977,7 @@ class Study:
                 "Study.directions)."
             )
 
-        self._storage.create_new_trial(self._study_id, template_trial=trial)
+        return self._storage.create_new_trial(self._study_id, template_trial=trial)
 
     def add_trials(self, trials: Iterable[FrozenTrial]) -> None:
         """Add trials to study.
