@@ -370,7 +370,7 @@ class TrialParamModel(BaseModel):
     )
 
     def check_and_add(self, session: orm.Session, study_id: int) -> None:
-        self._check_compatibility_with_previous_trial_param_distributions(session, study_id)
+        # self._check_compatibility_with_previous_trial_param_distributions(session, study_id)
         session.add(self)
 
     def _check_compatibility_with_previous_trial_param_distributions(

@@ -161,7 +161,7 @@ def _optimize_sequential(
                 break
 
         try:
-            frozen_trial_id = _run_trial(study, func, catch)
+            frozen_trial_id, trial_state = _run_trial(study, func, catch)
         finally:
             # The following line mitigates memory problems that can be occurred in some
             # environments (e.g., services that use computing containers such as GitHub Actions).
@@ -178,6 +178,11 @@ def _optimize_sequential(
         if progress_bar is not None:
             elapsed_seconds = (datetime.datetime.now() - time_start).total_seconds()
             progress_bar.update(elapsed_seconds, study)
+        if trial_state == TrialState.PRUNED:
+            study._storage.delete_trial_if_needed(frozen_trial_id)
+        else:
+            if not study._storage._backend.cache_completed_trials:
+                study._storage.delete_trial_from_cache(frozen_trial_id)
 
     study._storage.remove_session()
 
@@ -186,7 +191,7 @@ def _run_trial(
     study: "optuna.Study",
     func: "optuna.study.study.ObjectiveFuncType",
     catch: tuple[type[Exception], ...],
-) -> int:
+) -> tuple[int, TrialState]:
     if is_heartbeat_enabled(study._storage):
         with warnings.catch_warnings():
             # Ignore ExperimentalWarning when using fail_stale_trials internally.
@@ -260,7 +265,7 @@ def _run_trial(
         and not isinstance(func_err, catch)
     ):
         raise func_err
-    return trial._trial_id
+    return trial._trial_id, updated_state
 
 
 def _log_failed_trial(

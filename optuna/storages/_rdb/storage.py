@@ -16,7 +16,7 @@ import os
 import random
 import sqlite3
 import time
-from typing import Any
+from typing import Any, Optional
 from typing import TYPE_CHECKING
 import uuid
 
@@ -208,7 +208,11 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
         grace_period: int | None = None,
         failed_trial_callback: Callable[["optuna.study.Study", FrozenTrial], None] | None = None,
         skip_table_creation: bool = False,
+        remove_pruned_trials: Optional[bool] = False,
+        cache_completed_trials: Optional[bool] = True,
     ) -> None:
+        self.remove_pruned_trials = remove_pruned_trials
+        self.cache_completed_trials = cache_completed_trials
         self.engine_kwargs = engine_kwargs or {}
         self.url = self._fill_storage_url_template(url)
         self.skip_compatibility_check = skip_compatibility_check
@@ -570,7 +574,7 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
 
             trial.state = template_trial.state
 
-        trial.number = trial.count_past_trials(session)
+        trial.number = trial.trial_id
         session.add(trial)
 
         return trial
@@ -1043,6 +1047,12 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
     ) -> Callable[["optuna.study.Study", FrozenTrial], None] | None:
         return self.failed_trial_callback
 
+    def delete_trial(self, trial_id: int) -> None:
+        with _create_scoped_session(self.scoped_session, True) as session:
+            session.execute(
+                sqlalchemy.delete(models.TrialModel).where(models.TrialModel.trial_id == trial_id)
+            )
+
 
 class _VersionManager:
     def __init__(
@@ -1182,6 +1192,7 @@ class _VersionManager:
         config.set_main_option("script_location", escape_alembic_config_value(alembic_dir))
         config.set_main_option("sqlalchemy.url", escape_alembic_config_value(self.url))
         return config
+
 
 
 def escape_alembic_config_value(value: str) -> str:

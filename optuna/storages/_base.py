@@ -623,3 +623,9 @@ class BaseStorage(abc.ABC):
             raise UpdateFinishedTrialError(
                 "Trial#{} has already finished and can not be updated.".format(trial.number)
             )
+
+    def delete_trial_if_needed(self, trial_id: int) -> None:
+        pass
+
+    def delete_trial_from_cache(self, trial_id: int) -> None:
+        pass
