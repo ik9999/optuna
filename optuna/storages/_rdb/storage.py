@@ -1048,10 +1048,11 @@ class RDBStorage(BaseStorage, BaseHeartbeat):
         return self.failed_trial_callback
 
     def delete_trial(self, trial_id: int) -> None:
-        with _create_scoped_session(self.scoped_session, True) as session:
-            session.execute(
-                sqlalchemy.delete(models.TrialModel).where(models.TrialModel.trial_id == trial_id)
-            )
+        with _create_scoped_session(self.scoped_session, False) as session:
+            trial = session.get(models.TrialModel, trial_id)
+            if trial is None:
+                return
+            session.delete(trial)
 
 
 class _VersionManager:
